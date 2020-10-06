@@ -12,6 +12,7 @@ embedded-time = "0.10.0"
 nb = "1.0.0"
 log = "0.4.11"
 heapless = "0.5.6"
+drogue-embedded-timer = { path = "../drogue-embedded-timer"}
 
 [dependencies.nom]
 version= "5.1.2"

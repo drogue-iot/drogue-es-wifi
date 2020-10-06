@@ -1,91 +1,93 @@
-use embedded_hal::{
-    prelude::*,
-    digital::v2::{
-        InputPin,
-        OutputPin,
-    },
-    timer::CountDown,
-    //spi::FullDuplex,
-    blocking::spi::Transfer,
-};
-
-use log;
-//use embedded_hal::blocking::delay::DelayMs;
-use core::slice::{Iter, Chunks};
-
-use crate::buffer::Buffer;
-use crate::selectable::Selectable;
-
+use embedded_hal::blocking::spi::Transfer;
+use embedded_hal::digital::v2::{OutputPin, InputPin};
+use drogue_embedded_timer::Delay;
 use heapless::{
-    String,
     consts::*,
+    String,
+    spsc::{Consumer, Producer}
 };
-use crate::delay::DelayTimer;
 
-use embedded_time::duration::{Duration, Milliseconds};
+use crate::protocol::{Request, Response, JoinInfo};
+use crate::chip_select::ChipSelect;
+use embedded_time::duration::Milliseconds;
+use crate::ready::Ready;
 
-pub struct EsWifiArbiter<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD>
-    where
-        CD: CountDown,
-        CD::Time: Duration + From<Milliseconds>,
-{
-    spi: SPI,
-    cs: ChipSelectPin,
-    ready: ReadyPin,
-    wakeup: WakeUpPin,
-    reset: ResetPin,
-    delay: DelayTimer<CD>,
+enum State {
+    Uninitialized,
+    Ready,
 }
 
-
-impl<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD> EsWifiArbiter<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD>
+pub struct Arbiter<'clock, 'q, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
     where
-        SPI: Transfer<u8>,
+        Spi: Transfer<u8>,
         ChipSelectPin: OutputPin,
         ReadyPin: InputPin,
-        WakeUpPin: OutputPin,
+        WakeupPin: OutputPin,
         ResetPin: OutputPin,
-        CD: CountDown,
-        CD::Time: Duration + From<Milliseconds>,
+        Clock: embedded_time::Clock + 'clock
 {
-    pub fn initialize(spi: SPI,
-                      mut cs: ChipSelectPin,
-                      mut ready: ReadyPin,
-                      mut wakeup: WakeUpPin,
-                      mut reset: ResetPin,
-                      mut count_down: CD,
-    ) -> Result<Self, ()> {
-        EsWifiArbiter {
-            cs,
+    spi: Spi,
+    cs: ChipSelect<'clock, ChipSelectPin, Clock>,
+    ready: Ready<ReadyPin>,
+    wakeup: WakeupPin,
+    reset: ResetPin,
+    delay: Delay<'clock, Clock>,
+    consumer: Consumer<'q, Request, U1>,
+    producer: Producer<'q, Response, U1>,
+    state: State,
+}
+
+impl<'clock, 'q, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'clock, 'q, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
+    where
+        Spi: Transfer<u8>,
+        ChipSelectPin: OutputPin,
+        ReadyPin: InputPin,
+        WakeupPin: OutputPin,
+        ResetPin: OutputPin,
+        Clock: embedded_time::Clock + 'clock
+{
+    pub fn new(spi: Spi,
+               cs: ChipSelectPin,
+               ready: ReadyPin,
+               wakeup: WakeupPin,
+               reset: ResetPin,
+               delay: Delay<'clock, Clock>,
+               consumer: Consumer<'q, Request, U1>,
+               producer: Producer<'q, Response, U1>,
+    ) -> Self {
+        Self {
             spi,
-            ready,
+            cs: ChipSelect::new(cs, delay.clone()),
+            ready: Ready::new(ready),
             wakeup,
             reset,
-            delay: DelayTimer::new(count_down),
-        }.wait_for_prompt()
+            delay,
+            consumer,
+            producer,
+            state: State::Uninitialized,
+        }
     }
 
-    fn wait_for_prompt(mut self) -> Result<Self, ()> {
+    fn initialize(&mut self) -> Result<(),()>{
         self.wakeup();
         self.reset();
 
-        self.cs.set_high().map_err(|_| ())?;
-        self.delay.delay_ms(10);
-
+        log::info!("await ready");
         self.await_data_ready();
+        log::info!("ready");
 
-        let _cs = self.cs.select(&mut self.delay);
+        let _cs = self.cs.select();
 
         let mut response = [0 as u8; 16];
         let mut pos = 0;
 
         loop {
             log::info!("loop {}", pos);
-            if self.ready.is_low().map_err(|_| ())? {
+            if ! self.ready.is_ready() {
                 break;
             }
             if pos >= response.len() {
-                return Err(());
+                return Err(())
             }
             let mut chunk = [0x0A, 0x0A];
             self.spi.transfer(&mut chunk);
@@ -101,27 +103,63 @@ impl<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD> EsWifiArbiter<SPI, C
             }
         }
 
-        //self.cs.set_high().map_err(|_| ())?;
-
         let needle = &[b'\r', b'\n', b'>', b' '];
-        log::info!("look for needle {:?}", needle);
-
-        drop(_cs);
+        log::info!("look for needle {:?} {}", needle, pos);
 
         if !response[0..pos].starts_with(needle) {
             log::info!("failed to initialize {:?}", &response[0..pos]);
             Err(())
         } else {
-            Ok(self)
+            self.state = State::Ready;
+            Ok(())
         }
     }
 
-    fn send(&mut self, command: &[u8]) -> Result<(), ()> {
+    fn process_requests(&mut self) {
+        if let Some(request) = self.consumer.dequeue() {
+            log::info!("handle request: {:?}", request);
+
+            match request {
+                Request::Join(ref join_info) => {
+                    self.join(join_info);
+                },
+            }
+        }
+    }
+
+    pub fn isr(&mut self) -> Result<(),()>{
+        if matches!(self.state, State::Uninitialized) {
+            self.initialize()?;
+        }
+
+        self.process_requests();
+
+        Ok(())
+    }
+
+    fn wakeup(&mut self) {
+        self.wakeup.set_low();
+    }
+
+    fn reset(&mut self) {
+        self.reset.set_low();
+        self.delay.delay(Milliseconds(10u32));
+        self.reset.set_high();
+        self.delay.delay(Milliseconds(10u32));
+    }
+
+    fn await_data_ready(&mut self) {
+        while ! self.ready.is_ready() {
+            continue;
+        }
+    }
+
+    fn send(&mut self, command: &[u8], response: &mut [u8]) -> Result<usize, ()> {
         log::info!("send {:?}", command);
 
         self.await_data_ready();
         {
-            let _cs = self.cs.select(&mut self.delay);
+            let _cs = self.cs.select();
 
             for chunk in command.chunks(2) {
                 let mut xfer: [u8; 2] = [0; 2];
@@ -137,21 +175,18 @@ impl<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD> EsWifiArbiter<SPI, C
             }
         }
         self.await_data_ready();
-        self.receive();
-
-        Ok(())
+        self.receive(response)
     }
 
-    fn receive(&mut self) -> Result<(), ()> {
-        let mut response: [u8; 1024] = [0; 1024];
+    fn receive(&mut self, response: &mut [u8]) -> Result<usize, ()> {
         let mut pos = 0;
 
-        let _cs = self.cs.select(&mut self.delay);
+        let _cs = self.cs.select();
 
-        while self.ready.is_high().unwrap_or(true) {
+        while self.ready.is_ready() {
             let mut xfer: [u8; 2] = [0x0A, 0x0A];
             self.spi.transfer(&mut xfer);
-            //log::info!( "read {} {}", xfer[1] as char, xfer[0] as char);
+            log::info!( "read {} {}", xfer[1] as char, xfer[0] as char);
             response[pos] = xfer[1];
             pos += 1;
             response[pos] = xfer[0];
@@ -159,85 +194,49 @@ impl<SPI, ChipSelectPin, ReadyPin, WakeUpPin, ResetPin, CD> EsWifiArbiter<SPI, C
         }
         log::info!("response {}", core::str::from_utf8(&response[0..pos]).unwrap());
 
-        Ok(())
+        Ok(pos)
     }
 
-    fn wakeup(&mut self) {
-        self.wakeup.set_low();
-    }
+    // ------------------------------------------------------------------------
+    // Request handling
+    // ------------------------------------------------------------------------
 
-    fn reset(&mut self) {
-        self.reset.set_low();
-        self.delay.delay_ms(10);
-        self.reset.set_high();
-        self.delay.delay_ms(10);
-    }
+    fn join(&mut self, join_info: &JoinInfo) {
+        log::info!("JOIN {:?}", join_info);
+        match join_info {
+            JoinInfo::Open => {
 
-    fn await_data_ready(&mut self) {
-        while self.ready.is_low().unwrap_or(false) {
-            continue;
+            },
+            JoinInfo::Wep { ssid, password } => {
+                let mut response = [0u8; 1024];
+                let mut command: String<U36> = String::from("C1=");
+                command.push_str(ssid);
+                command.push('\r');
+                self.send(command.as_bytes(), &mut response);
+
+                let mut command: String<U72> = String::from("C2=");
+                command.push_str(password);
+                command.push('\r');
+                self.send(command.as_bytes(), &mut response);
+
+                let mut command: String<U72> = String::from("C3=4\r");
+                //command.push_str(password);
+                //command.push('\r');
+                self.send(command.as_bytes(), &mut response);
+
+                let mut command: String<U72> = String::from("C0\r");
+                if let Ok( len ) = self.send(command.as_bytes(), &mut response) {
+                    if let Ok( (_,response) )= crate::parser::join_response( &response[0..len]) {
+                        self.producer.enqueue(response );
+                    } else {
+                        log::info!("failed to parse {:?}", &response[0..4]);
+                    }
+                } else {
+                    log::info!("failed to send")
+                }
+
+            },
         }
     }
 
-    pub fn get_serial_number(&mut self) -> Result<(), ()> {
-        self.send(b"F0\r")?;
-        Ok(())
-    }
-
-
-    pub fn join(&mut self, ssid: &str, password: &str) -> Result<(), ()> {
-        let mut command: String<U36> = String::from("C1=");
-        command.push_str(ssid);
-        command.push('\r');
-        self.send(command.as_bytes());
-
-        let mut command: String<U72> = String::from("C2=");
-        command.push_str(password);
-        command.push('\r');
-        self.send(command.as_bytes());
-
-        let mut command: String<U72> = String::from("C3=4\r");
-        //command.push_str(password);
-        //command.push('\r');
-        self.send(command.as_bytes());
-
-
-        let mut command: String<U72> = String::from("C0\r");
-        self.send(command.as_bytes());
-
-        self.send(b"MR\r\n");
-
-        Ok(())
-    }
-
-    pub fn resolve(&mut self, hostname: &str) -> Result<(), ()> {
-        let mut command: String<U72> = String::from("D0=");
-        command.push_str(hostname);
-        command.push('\r');
-        self.send(command.as_bytes());
-
-        Ok(())
-    }
-
-    pub fn isr(&mut self) -> &mut ReadyPin {
-        &mut self.ready
-    }
 }
-
-/*
-pub fn byte_swapped_and_padded<I>(cmd: &[u8]) -> I
-    where I: Iterator<Item=u8>
-{
-    cmd.chunks(2)
-        .map(|chunk| {
-            if chunk.len() == 1 {
-                &[b0xA0, chunk[0]]
-            } else {
-                &[chunk[1], chunk[0]]
-            }
-        })
-}
-
-
-
- */
