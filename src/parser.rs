@@ -48,3 +48,24 @@ named!(
         join
     )
 );
+
+named!(
+    pub connect_response<Response>,
+    alt!(
+        connected
+    )
+);
+
+named!(
+    pub connected<Response>,
+    do_parse!(
+        tag!("\r\n") >>
+        tag!("[TCP  RC] Connecting to ") >>
+        take_until!( "\r\n") >>
+        tag!("\r\n") >>
+        ok >>
+        (
+            Response::Ok()
+        )
+    )
+);

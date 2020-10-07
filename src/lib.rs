@@ -6,6 +6,8 @@ mod parser;
 pub mod protocol;
 mod chip_select;
 mod ready;
+mod socket;
+pub mod network;
 
 use drogue_embedded_timer::Delay;
 use embedded_hal::blocking::spi::Transfer;
