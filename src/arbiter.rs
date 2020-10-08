@@ -298,6 +298,8 @@ impl<'clock, 'q, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbit
 
         //self.send( write_info.data.as_ref(), &mut response);
 
+
+        // to ensure it's an even number of bytes, abscond with 1 byte from the payload.
         let prefix = [ b'S', b'0', b'\r', write_info.data[0]];
         let remainder = &write_info.data[1..write_info.data.len()];
 
@@ -308,11 +310,11 @@ impl<'clock, 'q, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbit
             for chunk in prefix.chunks(2) {
                 let mut xfer: [u8; 2] = [0; 2];
                 xfer[1] = chunk[0];
-                if chunk.len() == 2 {
-                    xfer[0] = chunk[1]
-                } else {
-                    xfer[0] = 0x0A
-                }
+                xfer[0] = chunk[1];
+                //if chunk.len() == 2 {
+                //} else {
+                    //xfer[0] = 0x0A
+                //}
 
                 //log::info!("transfer {:?}", xfer);
                 self.spi.transfer(&mut xfer);

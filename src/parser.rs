@@ -64,6 +64,7 @@ named!(
         take_until!( "\r\n") >>
         tag!("\r\n") >>
         ok >>
+        prompt >>
         (
             Response::Ok()
         )
