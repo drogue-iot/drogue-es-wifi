@@ -4,67 +4,132 @@ use heapless::{
     spsc::{Producer, Consumer},
     consts::*,
 };
-use crate::protocol::{Request, Response, JoinInfo, ConnectionType, ConnectInfo, WriteInfo};
+use crate::protocol::{Response, ConnectionType, ConnectInfo, WriteInfo};
 use crate::socket::{Socket, State};
-use crate::network::EsWifiNetworkDriver;
+//use crate::network::EsWifiNetworkDriver;
 use drogue_network::addr::HostSocketAddr;
+use crate::arbiter::Arbiter;
+use core::cell::RefCell;
+use drogue_embedded_timer::Delay;
+use embedded_hal::blocking::spi::Transfer;
+use embedded_hal::digital::v2::{OutputPin, InputPin};
+use crate::parser::join;
 
 pub enum AdapterError {
+    ReadError,
     NoAvailableSockets,
     SocketNotOpen,
 }
 
-pub struct Adapter<'q> {
-    requests: Producer<'q, Request, U1>,
-    responses: Consumer<'q, Response, U1>,
-    sockets: [Socket; 4],
+
+#[derive(Debug)]
+pub enum JoinError {
+    Unknown,
+    InvalidSsid,
+    InvalidPassword,
+    UnableToAssociate,
 }
 
-impl<'q> Adapter<'q> {
-    pub fn new(
-        producer: Producer<'q, Request, U1>,
-        consumer: Consumer<'q, Response, U1>,
-    ) -> Self {
-        Self {
-            requests: producer,
-            responses: consumer,
-            sockets: Socket::create(),
-        }
-    }
+#[derive(Debug)]
+pub enum JoinInfo<'a> {
+    Open,
+    Wep {
+        ssid: &'a str,
+        password: &'a str,
+    },
+}
 
-    fn await_response(&mut self) -> Response {
-        loop {
-            if let Some(response) = self.responses.dequeue() {
-                log::info!("response {:?}", response);
-                return response;
+impl JoinInfo<'_> {
+    pub(crate) fn validate(&self) -> Result<&Self, JoinError> {
+        match self {
+            JoinInfo::Open => {
+                Ok(self)
+            }
+            JoinInfo::Wep { ssid, password } => {
+                if ssid.len() > 32 {
+                    Err(JoinError::InvalidSsid)
+                } else if password.len() > 32 {
+                    Err(JoinError::InvalidPassword)
+                } else {
+                    Ok(self)
+                }
+            }
+            _ => {
+                Ok(self)
             }
         }
     }
+}
 
-    pub fn join(&mut self, ssid: &str, password: &str) -> Result<Response, ()> {
-        self.requests.enqueue(
-            Request::Join(JoinInfo::Wep {
-                ssid: String::from(ssid),
-                password: String::from(password),
-            })
+pub struct Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
+    where
+        Spi: Transfer<u8>,
+        ChipSelectPin: OutputPin,
+        ReadyPin: InputPin,
+        WakeupPin: OutputPin,
+        ResetPin: OutputPin,
+        Clock: embedded_time::Clock + 'clock
+{
+    pub(crate) arbiter: RefCell<Arbiter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>>,
+    pub(crate) sockets: RefCell<[Socket; 4]>,
+}
+
+impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
+    where
+        Spi: Transfer<u8>,
+        ChipSelectPin: OutputPin,
+        ReadyPin: InputPin,
+        WakeupPin: OutputPin,
+        ResetPin: OutputPin,
+        Clock: embedded_time::Clock + 'clock
+{
+    pub fn new(
+        spi: Spi,
+        cs: ChipSelectPin,
+        ready: ReadyPin,
+        wakeup: WakeupPin,
+        reset: ResetPin,
+        delay: Delay<'clock, Clock>,
+    ) -> Result<Self, ()> {
+        let mut arbiter = Arbiter::new(
+            spi,
+            cs,
+            ready,
+            wakeup,
+            reset,
+            delay,
         );
 
-        Ok(self.await_response())
-        //loop {
-        //if let Some(response) = self.responses.dequeue() {
-        //log::info!("response {:?}", response);
-        //return Ok(response);
-        //}
-        //}
+        Ok(Self {
+            arbiter: RefCell::new(arbiter),
+            sockets: RefCell::new(Socket::create()),
+        })
     }
 
+
+    pub fn join(&mut self, join_info: &JoinInfo) -> Result<(), JoinError> {
+        join_info.validate()?;
+        let mut arbiter = self.arbiter.borrow_mut();
+        arbiter.join(join_info)
+    }
+
+    pub fn join_open(&mut self) -> Result<(), JoinError> {
+        self.join(&JoinInfo::Open)
+    }
+
+    pub fn join_wep(&mut self, ssid: &str, password: &str) -> Result<(), JoinError> {
+        self.join(
+            &JoinInfo::Wep {
+                ssid,
+                password,
+            }
+        )
+    }
+
+    /*
     // ------------------------------------------------------------------------
     // Network-related
     // ------------------------------------------------------------------------
-
-    pub fn into_network_driver(self) -> EsWifiNetworkDriver<'q> {
-        EsWifiNetworkDriver::new(self)
-    }
 
     pub fn open(&mut self) -> Result<usize, AdapterError> {
         if let Some((index, socket)) = self
@@ -82,8 +147,8 @@ impl<'q> Adapter<'q> {
 
     pub fn connect_tcp(&mut self, socket_num: usize, remote: HostSocketAddr) -> Result<(), AdapterError> {
         let socket = &self.sockets[socket_num];
-        if ! socket.is_open() {
-            return Err( AdapterError::SocketNotOpen )
+        if !socket.is_open() {
+            return Err(AdapterError::SocketNotOpen);
         }
 
         self.requests.enqueue(
@@ -103,8 +168,8 @@ impl<'q> Adapter<'q> {
 
     pub fn write(&mut self, socket_num: usize, data: &[u8]) -> nb::Result<usize, AdapterError> {
         let socket = &self.sockets[socket_num];
-        if ! socket.is_open() {
-            return Err(nb::Error::from( AdapterError::SocketNotOpen ));
+        if !socket.is_open() {
+            return Err(nb::Error::from(AdapterError::SocketNotOpen));
         }
 
         let mut len = data.len();
@@ -124,4 +189,6 @@ impl<'q> Adapter<'q> {
         let response = self.await_response();
         Ok(len)
     }
+
+     */
 }

@@ -2,11 +2,7 @@ use heapless::{String, consts::*, Vec};
 use drogue_network::tcp::Mode;
 use drogue_network::addr::HostSocketAddr;
 
-#[derive(Debug)]
-pub enum JoinInfo {
-    Open,
-    Wep { ssid: String<U32>, password: String<U64> },
-}
+
 
 #[derive(Debug)]
 pub enum ConnectionType {
@@ -22,17 +18,19 @@ pub struct ConnectInfo {
 }
 
 #[derive(Debug)]
-pub struct WriteInfo {
+pub struct WriteInfo<'a> {
     pub socket_num: usize,
-    pub data: Vec<u8, U1024>,
+    pub data: &'a [u8],
 }
 
+/*
 #[derive(Debug)]
 pub enum Request {
     Join(JoinInfo),
     Connect(ConnectInfo),
     Write(WriteInfo),
 }
+ */
 
 #[derive(Debug)]
 pub enum Response {
@@ -40,3 +38,5 @@ pub enum Response {
     Error(),
     Joined(String<U32>),
 }
+
+

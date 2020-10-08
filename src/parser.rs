@@ -1,15 +1,19 @@
-
-
-use crate::protocol::Response;
+use crate::protocol::{
+    Response,
+};
 use nom::{
     do_parse,
+    complete,
     named,
+    named_args,
     alt,
     tag,
     char,
+    take,
     take_until,
 };
 use heapless::String;
+use crate::adapter::JoinError;
 
 named!(
     pub ok,
@@ -17,16 +21,26 @@ named!(
 );
 
 named!(
+    pub error,
+    tag!("ERROR\r\n")
+);
+
+named!(
     pub prompt,
     tag!("> ")
 );
 
+#[derive(Debug)]
+pub(crate) enum JoinResponse {
+    Ok,
+    JoinError,
+}
+
 // [JOIN   ] drogue,192.168.1.174,0,0
 #[rustfmt::skip]
 named!(
-    pub join<Response>,
+    pub(crate) join<JoinResponse>,
     do_parse!(
-        tag!("\r\n") >>
         tag!("[JOIN   ] ") >>
         ssid: take_until!(",") >>
         char!(',') >>
@@ -35,17 +49,42 @@ named!(
         tag!("0,0") >>
         tag!("\r\n") >>
         ok >>
-        prompt >>
-        ( {
-            Response::Joined(String::from(core::str::from_utf8(ssid).unwrap()))
-        } )
+        (
+            JoinResponse::Ok
+        )
+        //( {
+            //Response::Joined(String::from(core::str::from_utf8(ssid).unwrap()))
+        //} )
+    )
+);
+
+// [JOIN   ] drogue
+// [JOIN   ] Failed
+named!(
+    pub(crate) join_error<JoinResponse>,
+    do_parse!(
+        take_until!( "ERROR" ) >>
+        error >>
+        (
+            JoinResponse::JoinError
+        )
     )
 );
 
 named!(
-    pub join_response<Response>,
-    alt!(
-        join
+    pub(crate) join_response<JoinResponse>,
+    do_parse!(
+        tag!("\r\n") >>
+        response:
+        alt!(
+              complete!(join)
+            | complete!(join_error)
+        ) >>
+        prompt >>
+        (
+            response
+        )
+
     )
 );
 
@@ -70,3 +109,24 @@ named!(
         )
     )
 );
+
+#[derive(Debug)]
+pub enum ReadResponse<'a> {
+    Ok(&'a [u8]),
+    Err,
+}
+
+named!(
+    pub read_data<ReadResponse>,
+    do_parse!(
+        tag!("\r\n") >>
+        data: take_until!("\r\nOK\r\n>") >>
+        tag!("\r\n") >>
+        ok >>
+        prompt >>
+        (
+            ReadResponse::Ok(data)
+        )
+    )
+);
+
