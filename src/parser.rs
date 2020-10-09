@@ -127,6 +127,46 @@ named!(
 );
 
 #[derive(Debug)]
+pub(crate) enum CloseResponse {
+    Ok,
+    Error,
+}
+
+named!(
+    pub(crate) closed<CloseResponse>,
+    do_parse!(
+        tag!("\r\n") >>
+        tag!("\r\n") >>
+        ok >>
+        prompt >>
+        (
+            CloseResponse::Ok
+        )
+    )
+);
+
+named!(
+    pub(crate) close_error<CloseResponse>,
+    do_parse!(
+        tag!("\r\n") >>
+        take_until!( "ERROR" ) >>
+        error >>
+        prompt >>
+        (
+            CloseResponse::Error
+        )
+    )
+);
+
+named!(
+    pub(crate) close_response<CloseResponse>,
+    alt!(
+          complete!(closed)
+        | complete!(close_error)
+    )
+);
+
+#[derive(Debug)]
 pub(crate) enum WriteResponse {
     Ok(usize),
     Error,

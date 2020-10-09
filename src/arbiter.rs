@@ -9,9 +9,9 @@ use core::fmt::Write;
 use crate::chip_select::ChipSelect;
 use crate::ready::Ready;
 use nom::InputIter;
-use crate::adapter::{AdapterError, JoinError, JoinInfo, ConnectError, WriteError, ReadError};
+use crate::adapter::{AdapterError, JoinError, JoinInfo, ConnectError, WriteError, ReadError, CloseError};
 use crate::parser;
-use crate::parser::{JoinResponse, ConnectResponse, WriteResponse, ReadResponse};
+use crate::parser::{JoinResponse, ConnectResponse, WriteResponse, ReadResponse, CloseResponse};
 use nom::error::ErrorKind;
 use drogue_network::addr::HostSocketAddr;
 
@@ -146,6 +146,18 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
         if matches!(self.state, State::Uninitialized) {
             self.initialize();
         }
+
+        let mut response = [0u8; 1024];
+
+        let response = self.send_string(
+            &command!(U4, "MR"),
+                &mut response
+        );
+
+        if response.is_ok() {
+            let response = response.unwrap();
+            log::info!( "backlog {}", core::str::from_utf8(&response).unwrap());
+        }
     }
 
     fn wakeup(&mut self) {
@@ -170,7 +182,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
     }
 
     fn send<'a>(&mut self, command: &[u8], response: &'a mut [u8]) -> Result<&'a [u8], SpiError> {
-       // log::info!("send {:?}", core::str::from_utf8(command).unwrap());
+        //log::info!("send {:?}", core::str::from_utf8(command).unwrap());
 
         self.await_data_ready();
         {
@@ -215,7 +227,6 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
             }
         }
         //log::info!("response {}", core::str::from_utf8(&response[0..pos]).unwrap());
-        //Ok(pos)
         Ok(&mut response[0..pos])
     }
 
@@ -257,6 +268,8 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
 
                 log::info!("response for JOIN {:?}", parse_result);
 
+                self.process_backlog();
+
                 match parse_result {
                     Ok((_, response)) => {
                         match response {
@@ -273,29 +286,12 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
                         Err(JoinError::UnableToAssociate)
                     }
                 }
-                /*
-                if parse_result.is_ok() {
-                    let (_, response) = parse_result.unwrap();
-                    match response {
-                        JoinResponse::Ok => {
-                            Ok(())
-                        }
-                        JoinResponse::JoinError => {
-                            Err(JoinError::UnableToAssociate)
-                        }
-                    }
-                } else {
-                    Err(JoinError::UnableToAssociate)
-                }
-
-                 */
             }
         }
-
-        //Err(JoinError::Unknown)
     }
 
     pub(crate) fn connect(&mut self, proto: IpProtocol, socket_num: usize, remote: HostSocketAddr) -> Result<(), ConnectError> {
+        self.process_backlog();
         log::info!("CONNECT {:?} {:?}", proto, remote);
 
         let mut response = [0u8; 1024];
@@ -325,12 +321,35 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
             &command!(U32, "P4={}", remote.port()),
             &mut response).map_err(|e| ConnectError::SpiError(e))?;
 
-        let response = self.send_string(&command!(U8, "P6=1"), &mut response).map_err(|_| ConnectError::ParseError)?;
+        let response = self.send_string(&command!(U8, "P6=1"), &mut response).map_err(|e| ConnectError::SpiError(e))?;
 
         if let Ok((_, ConnectResponse::Ok)) = parser::connect_response(&response) {
             Ok(())
         } else {
             Err(ConnectError::ConnectionFailed)
+        }
+    }
+
+    pub(crate) fn close(&mut self, socket_num: usize) -> Result<(), CloseError> {
+        self.process_backlog();
+        let mut response = [0u8; 1024];
+
+        self.send_string(
+            &command!( U8, "P0={}", socket_num),
+            &mut response).map_err(|e| CloseError::SpiError(e))?;
+
+        let response = self.send_string(&command!(U8, "P6=0"), &mut response).map_err(|e| CloseError::SpiError(e))?;
+
+        //let response = parser::close_response(&response);
+
+        //log::info!("close resp {:?}", response);
+
+        //Ok(())
+
+        if let Ok((_, CloseResponse::Ok)) = parser::close_response(&response) {
+            Ok(())
+        } else {
+            Err(CloseError::Error)
         }
     }
 
@@ -403,6 +422,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
     }
 
     pub(crate) fn read(&mut self, socket_num: usize, buffer: &mut [u8]) -> Result<usize, ReadError> {
+        self.process_backlog();
         let mut pos = 0;
         let buf_len = buffer.len();
         loop {

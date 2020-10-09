@@ -1,4 +1,4 @@
-use drogue_network::tcp::{TcpStack, Mode, TcpError};
+use drogue_network::tcp::{TcpStack, Mode, TcpError, TcpImplError};
 use drogue_network::addr::HostSocketAddr;
 
 use nb;
@@ -62,8 +62,9 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
         Err(TcpError::ConnectionRefused)
     }
 
-    fn is_connected(&self, socket: &Self::TcpSocket) -> Result<bool, Self::Error> {
-        unimplemented!()
+    fn is_connected(&self, tcp_socket: &Self::TcpSocket) -> Result<bool, Self::Error> {
+        let socket = &self.sockets.borrow()[tcp_socket.0];
+        Ok(socket.is_connected())
     }
 
     fn write(&self, tcp_socket: &mut Self::TcpSocket, buffer: &[u8]) -> nb::Result<usize, Self::Error> {
@@ -84,7 +85,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
     }
 
     fn read(&self, tcp_socket: &mut Self::TcpSocket, buffer: &mut [u8]) -> nb::Result<usize, Self::Error> {
-        let socket = &self.sockets.borrow()[tcp_socket.0];
+        let mut socket = &mut self.sockets.borrow_mut()[tcp_socket.0];
         if !socket.is_open() {
             return Err(nb::Error::from(TcpError::SocketNotOpen));
         }
@@ -92,19 +93,31 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
         let mut arbiter = self.arbiter.borrow_mut();
 
         loop {
-            let len = arbiter.read(tcp_socket.0, buffer).map_err(|_| TcpError::ReadError)?;
+            let len = arbiter.read(tcp_socket.0, buffer).map_err(|_|
+                {
+                    socket.state = State::HalfClosed;
+                    TcpError::ReadError
+                })?;
 
             if len != 0 {
-                return Ok(len)
+                return Ok(len);
             }
 
             if matches!(socket.mode, Mode::NonBlocking) {
-                return Err(nb::Error::WouldBlock)
+                return Err(nb::Error::WouldBlock);
             }
         }
     }
 
-    fn close(&self, socket: Self::TcpSocket) -> Result<(), Self::Error> {
-        unimplemented!()
+    fn close(&self, tcp_socket: Self::TcpSocket) -> Result<(), Self::Error> {
+        let mut socket = &mut self.sockets.borrow_mut()[tcp_socket.0];
+        if !socket.is_open() {
+            return Err(TcpError::SocketNotOpen);
+        }
+
+        socket.state = State::Closed;
+        let mut arbiter = self.arbiter.borrow_mut();
+        arbiter.close(tcp_socket.0).map_err(|_| TcpError::Impl(TcpImplError::Unknown))?;
+        Ok(())
     }
 }

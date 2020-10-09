@@ -2,8 +2,9 @@ use drogue_network::tcp::Mode;
 
 pub(crate) enum State {
     Closed,
-    HalfClosed,
     Open,
+    Connected,
+    HalfClosed,
 }
 
 pub(crate) struct Socket {
@@ -21,16 +22,24 @@ impl Socket {
         ]
     }
 
+    pub(crate) fn is_connected(&self) -> bool {
+        matches!(&self.state, State::Connected)
+    }
+
     pub(crate) fn is_closed(&self) -> bool {
-        matches!(&self.state, State::Closed)
+        matches!(&self.state, State::Closed) || matches!(&self.state, State::HalfClosed)
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        matches!(&self.state, State::Open)
+        matches!(&self.state, State::Open) || self.is_connected()
     }
 
     pub(crate) fn is_blocking(&self) -> bool {
         matches!(&self.mode, Mode::Blocking)
+    }
+
+    pub(crate) fn is_non_blocking(&self) -> bool {
+        matches!(&self.mode, Mode::NonBlocking)
     }
 }
 

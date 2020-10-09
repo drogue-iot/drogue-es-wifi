@@ -41,8 +41,13 @@ pub enum JoinInfo<'a> {
 #[derive(Debug)]
 pub enum ConnectError {
     SpiError(SpiError),
-    ParseError,
     ConnectionFailed,
+}
+
+#[derive(Debug)]
+pub enum CloseError {
+    SpiError(SpiError),
+    Error,
 }
 
 #[derive(Debug)]
