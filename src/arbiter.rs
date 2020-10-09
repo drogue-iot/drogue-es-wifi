@@ -6,14 +6,14 @@ use heapless::{consts::*, String, spsc::{Consumer, Producer}, ArrayLength};
 
 use core::fmt::Write;
 
-use crate::protocol::{Response, ConnectInfo, ConnectionType, WriteInfo};
 use crate::chip_select::ChipSelect;
 use crate::ready::Ready;
 use nom::InputIter;
-use crate::adapter::{AdapterError, JoinError, JoinInfo};
+use crate::adapter::{AdapterError, JoinError, JoinInfo, ConnectError, WriteError, ReadError};
 use crate::parser;
-use crate::parser::JoinResponse;
+use crate::parser::{JoinResponse, ConnectResponse, WriteResponse, ReadResponse};
 use nom::error::ErrorKind;
+use drogue_network::addr::HostSocketAddr;
 
 macro_rules! command {
     ($size:tt, $($arg:tt)*) => ({
@@ -33,9 +33,15 @@ enum State {
 
 
 #[derive(Debug)]
-enum SpiError {
+pub enum SpiError {
     ReadError,
     WriteError,
+}
+
+#[derive(Debug)]
+pub enum IpProtocol {
+    Tcp,
+    Udp,
 }
 
 
@@ -164,7 +170,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
     }
 
     fn send<'a>(&mut self, command: &[u8], response: &'a mut [u8]) -> Result<&'a [u8], SpiError> {
-        log::info!("send {:?}", core::str::from_utf8(command).unwrap());
+       // log::info!("send {:?}", core::str::from_utf8(command).unwrap());
 
         self.await_data_ready();
         {
@@ -208,7 +214,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
                 pos += 1;
             }
         }
-        log::info!("response {}", core::str::from_utf8(&response[0..pos]).unwrap());
+        //log::info!("response {}", core::str::from_utf8(&response[0..pos]).unwrap());
         //Ok(pos)
         Ok(&mut response[0..pos])
     }
@@ -289,63 +295,72 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
         //Err(JoinError::Unknown)
     }
 
-    pub(crate) fn connect(&mut self, connect_info: &ConnectInfo) -> Result<Response, ()> {
-        log::info!("CONNECT {:?}", connect_info);
+    pub(crate) fn connect(&mut self, proto: IpProtocol, socket_num: usize, remote: HostSocketAddr) -> Result<(), ConnectError> {
+        log::info!("CONNECT {:?} {:?}", proto, remote);
 
         let mut response = [0u8; 1024];
-        let mut command: String<U8> = String::from("P0=");
-        write!(command, "{}\r", connect_info.socket_num).unwrap();
-        self.send(command.as_bytes(), &mut response);
 
-        match connect_info.connection_type {
-            ConnectionType::Tcp => {
-                self.send("P1=0\r".as_bytes(), &mut response);
+        self.send_string(
+            &command!( U8, "P0={}", socket_num),
+            &mut response).map_err(|e| ConnectError::SpiError(e))?;
+
+        match proto {
+            IpProtocol::Tcp => {
+                self.send_string(
+                    &command!(U8,"P1=0"),
+                    &mut response).map_err(|e| ConnectError::SpiError(e))?;
             }
-            ConnectionType::Udp => {
-                self.send("P1=1\r".as_bytes(), &mut response);
-            }
-        }
-
-        let mut command: String<U32> = String::from("P3=");
-        write!(command, "{}\r", connect_info.remote.addr().ip());
-        self.send(command.as_bytes(), &mut response);
-
-        let mut command: String<U32> = String::from("P4=");
-        write!(command, "{}\r", connect_info.remote.port());
-        self.send(command.as_bytes(), &mut response);
-
-        if let Ok(reply) = self.send("P6=1\r".as_bytes(), &mut response) {
-            if let Ok((_, response)) = parser::connect_response(&reply) {
-                return Ok(response);
-            } else {
-                log::info!("failed to parse {:?}", core::str::from_utf8(&reply).unwrap());
+            IpProtocol::Udp => {
+                self.send_string(
+                    &command!(U8,"P1=1"),
+                    &mut response).map_err(|e| ConnectError::SpiError(e))?;
             }
         }
-        Err(())
+
+        self.send_string(
+            &command!(U32, "P3={}", remote.addr().ip()),
+            &mut response).map_err(|e| ConnectError::SpiError(e))?;
+
+        self.send_string(
+            &command!(U32, "P4={}", remote.port()),
+            &mut response).map_err(|e| ConnectError::SpiError(e))?;
+
+        let response = self.send_string(&command!(U8, "P6=1"), &mut response).map_err(|_| ConnectError::ParseError)?;
+
+        if let Ok((_, ConnectResponse::Ok)) = parser::connect_response(&response) {
+            Ok(())
+        } else {
+            Err(ConnectError::ConnectionFailed)
+        }
     }
 
-    pub(crate) fn write(&mut self, write_info: &WriteInfo) -> Result<usize, ()> {
+    pub(crate) fn write(&mut self, socket_num: usize, buf: &[u8]) -> Result<usize, WriteError> {
         self.process_backlog();
-        log::info!("WRITE {:?}", write_info);
 
-        let mut len = write_info.data.len();
+        let mut len = buf.len();
         if len > 1046 {
             len = 1046
         }
 
         let mut response = [0u8; 1024];
 
-        let command = command!(U8, "P0={}", write_info.socket_num);
+        let command = command!(U8, "P0={}", socket_num);
         self.send(command.as_bytes(), &mut response);
 
-        let mut command: String<U16> = String::from("S1=");
-        write!(command, "{}\r", len);
-        self.send(command.as_bytes(), &mut response);
+        self.send_string(
+            &command!(U8, "P0={}", socket_num),
+            &mut response,
+        ).map_err(|e| WriteError::SpiError(e))?;
+
+        self.send_string(
+            &command!(U16, "S1={}", len),
+            &mut response,
+        ).map_err(|e| WriteError::SpiError(e))?;
 
 
         // to ensure it's an even number of bytes, abscond with 1 byte from the payload.
-        let prefix = [b'S', b'0', b'\r', write_info.data[0]];
-        let remainder = &write_info.data[1..len];
+        let prefix = [b'S', b'0', b'\r', buf[0]];
+        let remainder = &buf[1..len];
 
         self.await_data_ready();
         {
@@ -378,34 +393,74 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
             }
         }
         self.await_data_ready();
-        self.receive(&mut response);
+        let response = self.receive(&mut response).map_err(|e| WriteError::SpiError(e))?;
 
-        log::info!("response {}", core::str::from_utf8(&response).unwrap());
-
-        Ok(len)
+        if let Ok((_, WriteResponse::Ok(len))) = parser::write_response(response) {
+            Ok(len)
+        } else {
+            Err(WriteError::Error)
+        }
     }
 
-    pub(crate) fn read(&mut self, socket_num: usize, buffer: &mut [u8]) -> Result<usize, ()> {
+    pub(crate) fn read(&mut self, socket_num: usize, buffer: &mut [u8]) -> Result<usize, ReadError> {
+        let mut pos = 0;
+        let buf_len = buffer.len();
+        loop {
+            log::info!("loop read {}", pos );
+            let result = self.read_internal(socket_num, &mut buffer[pos..buf_len]);
+            match result {
+                Ok(len) => {
+                    log::info!("ok {}", len);
+                    pos += len;
+                    if len == 0 || pos == buffer.len() {
+                        log::info!("break");
+                        return Ok(pos);
+                    }
+                }
+                Err(e) => {
+                    if pos == 0 {
+                        log::info!("return errr");
+                        return Err(e);
+                    } else {
+                        log::info!("return non-error {}", pos);
+                        return Ok(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_internal(&mut self, socket_num: usize, buffer: &mut [u8]) -> Result<usize, ReadError> {
         self.process_backlog();
 
         let mut response = [0u8; 1100];
 
-        let mut command: String<U8> = String::from("P0=");
-        write!(command, "{}\r", socket_num);
-        self.send(command.as_bytes(), &mut response);
+        self.send_string(
+            &command!( U8, "P0={}", socket_num),
+            &mut response,
+        ).map_err(|e| ReadError::SpiError(e))?;
 
         let mut len = buffer.len();
         if len > 1460 {
             len = 1460;
         }
 
-        let mut command: String<U16> = String::from("R1=");
-        write!(command, "{}\r", len);
-        self.send(command.as_bytes(), &mut response);
+        self.send_string(
+            &command!( U16, "R1={}", len),
+            &mut response,
+        ).map_err(|e| ReadError::SpiError(e))?;
 
-        self.send("R2=0\r".as_bytes(), &mut response);
-        self.send("R3=1\r".as_bytes(), &mut response);
-        self.send("R?\r".as_bytes(), &mut response);
+        self.send_string(
+            &command!(U8, "R2=15"),
+            &mut response,
+        ).map_err(|e| ReadError::SpiError(e))?;
+
+        self.send_string(
+            &command!(U8, "R3=1"),
+            &mut response,
+        ).map_err(|e| ReadError::SpiError(e))?;
+
+        //self.send("R?\r".as_bytes(), &mut response);
 
         self.await_data_ready();
         {
@@ -420,19 +475,16 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
 
         self.await_data_ready();
 
-        if let Ok(len) = self.receive(&mut response) {
-            if let Ok((remainder, result)) = parser::read_data(&response) {
-                if let parser::ReadResponse::Ok(result) = result {
-                    for (i, b) in result.iter().enumerate() {
-                        buffer[i] = *b;
-                        //log::info!("b={}", *b as char);
-                    }
-                    return Ok(result.len());
-                }
+        let response = self.receive(&mut response).map_err(|e| ReadError::SpiError(e))?;
+
+        if let Ok((_, ReadResponse::Ok(data))) = parser::read_response(&response) {
+            for (i, b) in data.iter().enumerate() {
+                buffer[i] = *b;
             }
+            return Ok(data.len());
         }
         //result
-        Err(())
+        Err(ReadError::Error)
     }
 }
 

@@ -3,13 +3,14 @@ use drogue_network::addr::HostSocketAddr;
 
 use nb;
 use core::cell::RefCell;
-use crate::adapter::{Adapter, AdapterError};
+use crate::adapter::{Adapter, AdapterError, ReadError};
 use nb::Error;
 use crate::socket::State;
 use embedded_hal::blocking::spi::Transfer;
 use embedded_hal::digital::v2::{OutputPin, InputPin};
-use crate::protocol::{ConnectInfo, ConnectionType, WriteInfo};
+use crate::arbiter::IpProtocol;
 
+#[derive(Debug)]
 pub struct TcpSocket(usize);
 
 impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack for Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
@@ -33,6 +34,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
             .find(|(_, e)| e.is_closed())
         {
             socket.state = State::Open;
+            socket.mode = mode;
             return Ok(TcpSocket(index));
         }
 
@@ -48,15 +50,13 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
         let mut arbiter = self.arbiter.borrow_mut();
 
         let response = arbiter.connect(
-            &ConnectInfo {
-                socket_num: tcp_socket.0,
-                connection_type: ConnectionType::Tcp,
-                remote,
-            }
+            IpProtocol::Tcp,
+            tcp_socket.0,
+            remote,
         );
 
         if response.is_ok() {
-            return Ok(tcp_socket)
+            return Ok(tcp_socket);
         }
 
         Err(TcpError::ConnectionRefused)
@@ -74,12 +74,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
 
         let mut arbiter = self.arbiter.borrow_mut();
 
-        let result = arbiter.write(
-            &WriteInfo {
-                socket_num: tcp_socket.0,
-                data: buffer,
-            }
-        );
+        let result = arbiter.write(tcp_socket.0, buffer);
 
         if result.is_ok() {
             Ok(result.unwrap())
@@ -90,22 +85,23 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
 
     fn read(&self, tcp_socket: &mut Self::TcpSocket, buffer: &mut [u8]) -> nb::Result<usize, Self::Error> {
         let socket = &self.sockets.borrow()[tcp_socket.0];
-        if ! socket.is_open() {
+        if !socket.is_open() {
             return Err(nb::Error::from(TcpError::SocketNotOpen));
         }
 
         let mut arbiter = self.arbiter.borrow_mut();
 
-        let result = arbiter.read(
-            tcp_socket.0,
-            buffer,
-        );
+        loop {
+            let len = arbiter.read(tcp_socket.0, buffer).map_err(|_| TcpError::ReadError)?;
 
-        if result.is_ok() {
-            return Ok(result.unwrap())
+            if len != 0 {
+                return Ok(len)
+            }
+
+            if matches!(socket.mode, Mode::NonBlocking) {
+                return Err(nb::Error::WouldBlock)
+            }
         }
-
-        Err(nb::Error::Other(TcpError::ReadError))
     }
 
     fn close(&self, socket: Self::TcpSocket) -> Result<(), Self::Error> {

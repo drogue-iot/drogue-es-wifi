@@ -4,11 +4,10 @@ use heapless::{
     spsc::{Producer, Consumer},
     consts::*,
 };
-use crate::protocol::{Response, ConnectionType, ConnectInfo, WriteInfo};
 use crate::socket::{Socket, State};
 //use crate::network::EsWifiNetworkDriver;
 use drogue_network::addr::HostSocketAddr;
-use crate::arbiter::Arbiter;
+use crate::arbiter::{Arbiter, SpiError};
 use core::cell::RefCell;
 use drogue_embedded_timer::Delay;
 use embedded_hal::blocking::spi::Transfer;
@@ -37,6 +36,25 @@ pub enum JoinInfo<'a> {
         ssid: &'a str,
         password: &'a str,
     },
+}
+
+#[derive(Debug)]
+pub enum ConnectError {
+    SpiError(SpiError),
+    ParseError,
+    ConnectionFailed,
+}
+
+#[derive(Debug)]
+pub enum WriteError {
+    Error,
+    SpiError(SpiError)
+}
+
+#[derive(Debug)]
+pub enum ReadError {
+    Error,
+    SpiError(SpiError),
 }
 
 impl JoinInfo<'_> {
@@ -126,69 +144,4 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'
         )
     }
 
-    /*
-    // ------------------------------------------------------------------------
-    // Network-related
-    // ------------------------------------------------------------------------
-
-    pub fn open(&mut self) -> Result<usize, AdapterError> {
-        if let Some((index, socket)) = self
-            .sockets
-            .iter_mut()
-            .enumerate()
-            .find(|(_, e)| e.is_closed())
-        {
-            socket.state = State::Open;
-            return Ok(index);
-        }
-
-        Err(AdapterError::NoAvailableSockets)
-    }
-
-    pub fn connect_tcp(&mut self, socket_num: usize, remote: HostSocketAddr) -> Result<(), AdapterError> {
-        let socket = &self.sockets[socket_num];
-        if !socket.is_open() {
-            return Err(AdapterError::SocketNotOpen);
-        }
-
-        self.requests.enqueue(
-            Request::Connect(
-                ConnectInfo {
-                    socket_num,
-                    connection_type: ConnectionType::Tcp,
-                    remote,
-                }
-            )
-        );
-
-        let response = self.await_response();
-
-        Ok(())
-    }
-
-    pub fn write(&mut self, socket_num: usize, data: &[u8]) -> nb::Result<usize, AdapterError> {
-        let socket = &self.sockets[socket_num];
-        if !socket.is_open() {
-            return Err(nb::Error::from(AdapterError::SocketNotOpen));
-        }
-
-        let mut len = data.len();
-        if len > 1024 {
-            len = 1024;
-        }
-
-        self.requests.enqueue(
-            Request::Write(
-                WriteInfo {
-                    socket_num,
-                    data: Vec::from_slice(&data[0..len]).unwrap(),
-                }
-            )
-        );
-
-        let response = self.await_response();
-        Ok(len)
-    }
-
-     */
 }

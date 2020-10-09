@@ -3,7 +3,6 @@
 pub mod adapter;
 pub mod arbiter;
 mod parser;
-pub mod protocol;
 mod chip_select;
 mod ready;
 mod socket;
@@ -19,4 +18,3 @@ use heapless::{
     consts::*,
     spsc::Queue
 };
-use crate::protocol::{Response};
