@@ -9,6 +9,7 @@ use crate::socket::State;
 use embedded_hal::blocking::spi::Transfer;
 use embedded_hal::digital::v2::{OutputPin, InputPin};
 use crate::arbiter::IpProtocol;
+use embedded_time::duration::Milliseconds;
 
 #[derive(Debug)]
 pub struct TcpSocket(usize);
@@ -92,6 +93,14 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
 
         let mut arbiter = self.arbiter.borrow_mut();
 
+        let mut timer = None;
+
+        if let Mode::Timeout(ms) = socket.mode {
+            timer = Some(
+                self.clock.new_timer(Milliseconds(ms as u32)).start().unwrap()
+            );
+        }
+
         loop {
             let len = arbiter.read(tcp_socket.0, buffer).map_err(|_|
                 {
@@ -103,21 +112,28 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> TcpStack 
                 return Ok(len);
             }
 
-            if matches!(socket.mode, Mode::NonBlocking) {
+            if socket.is_non_blocking() {
                 return Err(nb::Error::WouldBlock);
+            }
+
+            if let Some(ref timer) = timer {
+                if let Ok(true) = timer.is_expired() {
+                    return Ok(0)
+                }
             }
         }
     }
 
     fn close(&self, tcp_socket: Self::TcpSocket) -> Result<(), Self::Error> {
         let mut socket = &mut self.sockets.borrow_mut()[tcp_socket.0];
-        if !socket.is_open() {
-            return Err(TcpError::SocketNotOpen);
+        if socket.is_open() {
+            socket.state = State::Closed;
+            let mut arbiter = self.arbiter.borrow_mut();
+            arbiter.close(tcp_socket.0).map_err(|_| TcpError::Impl(TcpImplError::Unknown))?;
+        } else {
+            socket.state = State::Closed;
         }
 
-        socket.state = State::Closed;
-        let mut arbiter = self.arbiter.borrow_mut();
-        arbiter.close(tcp_socket.0).map_err(|_| TcpError::Impl(TcpImplError::Unknown))?;
         Ok(())
     }
 }

@@ -41,6 +41,10 @@ impl Socket {
     pub(crate) fn is_non_blocking(&self) -> bool {
         matches!(&self.mode, Mode::NonBlocking)
     }
+
+    pub(crate) fn is_timeout(&self) -> bool {
+        matches!(&self.mode, Mode::Timeout(_))
+    }
 }
 
 impl Default for Socket {

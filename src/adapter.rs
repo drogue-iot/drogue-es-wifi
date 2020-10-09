@@ -95,6 +95,7 @@ pub struct Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Cl
 {
     pub(crate) arbiter: RefCell<Arbiter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>>,
     pub(crate) sockets: RefCell<[Socket; 4]>,
+    pub(crate) clock: &'clock Clock,
 }
 
 impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
@@ -112,7 +113,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'
         ready: ReadyPin,
         wakeup: WakeupPin,
         reset: ResetPin,
-        delay: Delay<'clock, Clock>,
+        clock: &'clock Clock,
     ) -> Result<Self, ()> {
         let mut arbiter = Arbiter::new(
             spi,
@@ -120,12 +121,13 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'
             ready,
             wakeup,
             reset,
-            delay,
+            clock,
         );
 
         Ok(Self {
             arbiter: RefCell::new(arbiter),
             sockets: RefCell::new(Socket::create()),
+            clock,
         })
     }
 

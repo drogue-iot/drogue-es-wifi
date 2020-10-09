@@ -59,6 +59,7 @@ pub struct Arbiter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Cl
     ready: Ready<ReadyPin>,
     wakeup: WakeupPin,
     reset: ResetPin,
+    clock: &'clock Clock,
     delay: Delay<'clock, Clock>,
     state: State,
 }
@@ -77,15 +78,16 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
                ready: ReadyPin,
                wakeup: WakeupPin,
                reset: ResetPin,
-               delay: Delay<'clock, Clock>,
+               clock: &'clock Clock,
     ) -> Self {
         Self {
             spi,
-            cs: ChipSelect::new(cs, delay.clone()),
+            cs: ChipSelect::new(cs, Delay::new(clock)),
             ready: Ready::new(ready),
             wakeup,
             reset,
-            delay,
+            clock,
+            delay: Delay::new(clock),
             state: State::Uninitialized,
         }
     }
@@ -147,6 +149,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
             self.initialize();
         }
 
+        /*
         let mut response = [0u8; 1024];
 
         let response = self.send_string(
@@ -158,6 +161,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
             let response = response.unwrap();
             log::info!( "backlog {}", core::str::from_utf8(&response).unwrap());
         }
+         */
     }
 
     fn wakeup(&mut self) {
@@ -281,7 +285,7 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
                             }
                         }
                     }
-                    Err(e) => {
+                    Err(_) => {
                         log::info!( "{:?}", &response);
                         Err(JoinError::UnableToAssociate)
                     }
@@ -426,23 +430,18 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
         let mut pos = 0;
         let buf_len = buffer.len();
         loop {
-            log::info!("loop read {}", pos );
             let result = self.read_internal(socket_num, &mut buffer[pos..buf_len]);
             match result {
                 Ok(len) => {
-                    log::info!("ok {}", len);
                     pos += len;
                     if len == 0 || pos == buffer.len() {
-                        log::info!("break");
                         return Ok(pos);
                     }
                 }
                 Err(e) => {
                     if pos == 0 {
-                        log::info!("return errr");
                         return Err(e);
                     } else {
-                        log::info!("return non-error {}", pos);
                         return Ok(pos);
                     }
                 }
