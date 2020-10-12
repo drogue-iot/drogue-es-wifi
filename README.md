@@ -1,3 +1,7 @@
+[![crates.io](https://img.shields.io/crates/v/drogue-es-wifi.svg)](https://crates.io/crates/drogue-es-wifi)
+[![docs.rs](https://docs.rs/drogue-es-wifi/badge.svg)](https://docs.rs/drogue-es-wifi)
+[![Matrix](https://img.shields.io/matrix/drogue-iot:matrix.org)](https://matrix.to/#/#drogue-iot:matrix.org)
+
 # `drogue-es-wifi`
 
 Driver for the [Inventek eS-WiFi SPI WiFi offload board](https://www.digikey.com/en/products/detail/inventek-systems/ISM43362-M3G-L44-E-C6-2-1-8/7070042).
@@ -8,8 +12,8 @@ The eS-WiFi board is interfaced over an SPI peripheral, plus a handful of additi
 
 * SPI
   * SCK
-  * MISO
-  * MOSI
+  * CIPO
+  * COPI
 * chip-select
 * ready
 * wake-up
@@ -22,9 +26,9 @@ Gather and configure your SPI and non-SPI pins appropriately for your particular
 ```rust
 let sck = gpioc.pc10.into_af6(&mut gpioc.moder, &mut gpioc.afrh);
 
-let miso = gpioc.pc11.into_af6(&mut gpioc.moder, &mut gpioc.afrh);
+let cipo = gpioc.pc11.into_af6(&mut gpioc.moder, &mut gpioc.afrh);
 
-let mosi = gpioc.pc12.into_af6(&mut gpioc.moder, &mut gpioc.afrh);
+let copi = gpioc.pc12.into_af6(&mut gpioc.moder, &mut gpioc.afrh);
 
 let mut cs = gpioe.pe0.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
@@ -36,7 +40,7 @@ let mut wakeup = gpiob.pb13.into_push_pull_output(&mut gpiob.moder, &mut gpiob.o
 
 let mut spi = Spi::spi3(
     device.SPI3,
-    (sck, miso, mosi),
+    (sck, cipo, copi),
     MODE,
     20.mhz(),
     clocks,
