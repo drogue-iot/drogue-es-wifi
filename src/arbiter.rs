@@ -128,7 +128,6 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
         }
 
         let needle = &[b'\r', b'\n', b'>', b' '];
-        //log::info!("look for needle {:?} {}", needle, pos);
 
         drop(_cs);
 
@@ -207,11 +206,11 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Arbiter<'
                 }
             }
         }
-        self.await_data_ready();
         self.receive(response)
     }
 
     fn receive<'a>(&mut self, response: &'a mut [u8]) -> Result<&'a [u8], SpiError> {
+        self.await_data_ready();
         let mut pos = 0;
 
         let _cs = self.cs.select();

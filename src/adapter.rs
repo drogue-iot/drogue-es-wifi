@@ -84,6 +84,8 @@ impl JoinInfo<'_> {
     }
 }
 
+
+/// eS-WiFi Adapter, over SPI
 pub struct Adapter<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock>
     where
         Spi: Transfer<u8>,
@@ -107,6 +109,14 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'
         ResetPin: OutputPin,
         Clock: embedded_time::Clock + 'clock
 {
+    /// Create a new eS-WiFi Adapter.
+    ///
+    /// * `spi`: The SPI transfer interface (u8).
+    /// * `cs`: The chip-select pin for the adapter.
+    /// * `ready`: The input pin to know when the adapter is ready for a data phase.
+    /// * `wakeup`: The adapter's wake-up pin.
+    /// * `reset`: The adapter's reset pin.
+    /// * `clock`: A clock capable of 10ms precision
     pub fn new(
         spi: Spi,
         cs: ChipSelectPin,
@@ -131,17 +141,19 @@ impl<'clock, Spi, ChipSelectPin, ReadyPin, WakeupPin, ResetPin, Clock> Adapter<'
         })
     }
 
-
+    /// Join a WiFi access point.
     pub fn join(&mut self, join_info: &JoinInfo) -> Result<(), JoinError> {
         join_info.validate()?;
         let mut arbiter = self.arbiter.borrow_mut();
         arbiter.join(join_info)
     }
 
+    /// Join an open WiFi access point.
     pub fn join_open(&mut self) -> Result<(), JoinError> {
         self.join(&JoinInfo::Open)
     }
 
+    /// Join a WEP-secured WiFI access point.
     pub fn join_wep(&mut self, ssid: &str, password: &str) -> Result<(), JoinError> {
         self.join(
             &JoinInfo::Wep {
